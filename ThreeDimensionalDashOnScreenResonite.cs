@@ -8,6 +8,7 @@ using System.Reflection;
 using System;
 using Elements.Core;
 using FrooxEngine.UIX;
+using Renderite.Shared;
 
 namespace ThreeDimensionalDashOnScreen
 {
@@ -15,7 +16,7 @@ namespace ThreeDimensionalDashOnScreen
 	{
 		public override string Name => "3DDashOnScreenResonite";
 		public override string Author => "rampa3";
-		public override string Version => "3.6.1";
+		public override string Version => "3.6.2";
 		public override string Link => "https://github.com/rampa3/3DDashOnScreenResonite";
 		private static ModConfiguration Config;
 
