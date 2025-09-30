@@ -25,25 +25,30 @@ namespace ThreeDimensionalDashOnScreen
 		{
 			Config = GetConfiguration();
 			Config.Save(true);
-			Harmony harmony = new Harmony("net.rampa3.3DDashOnScreenResonite");
-			if (Config.GetValue(MOD_ENABLED))
-			{
-				patchDash(harmony);
-				patchSlotPositioning(harmony);
-				addUIEditKey(harmony);
-				addDesktopControlPanelKeybind(harmony);
-				patchCameraUI(harmony);
-				disableForceItemKeepGrabbed(harmony);
-				fixResoniteNotifications(harmony);
-				Debug("All patches applied successfully!");
-			} else {
-				Debug("3DDashOnScreen disabled!");
-			}
 			
+			// Initialize ModActive from config
+			ModActive = Config.GetValue(MOD_ENABLED);
+			
+			Harmony harmony = new Harmony("net.rampa3.3DDashOnScreenResonite");
+			
+			// Always apply patches - they will check ModActive internally
+			patchDash(harmony);
+			patchSlotPositioning(harmony);
+			addUIEditKey(harmony);
+			addDesktopControlPanelKeybind(harmony);
+			patchCameraUI(harmony);
+			disableForceItemKeepGrabbed(harmony);
+			fixResoniteNotifications(harmony);
+			addToggleModKey(harmony);
+			
+			Debug("All patches applied successfully!");
 		}
 
 		[AutoRegisterConfigKey]
 		private static ModConfigurationKey<bool> MOD_ENABLED = new ModConfigurationKey<bool>("ModEnabled", "Enabled (requires restart on change)", () => true);
+
+		[AutoRegisterConfigKey]
+		private static ModConfigurationKey<Key> TOGGLE_MOD_KEY = new ModConfigurationKey<Key>("ToggleModKey", "Toggle mod on/off in realtime", () => Key.F4);
 
 		[AutoRegisterConfigKey]
 		private static ModConfigurationKey<Key> DESKTOP_CONTROL_PANEL_KEY = new ModConfigurationKey<Key>("DesktopControlPanelKey", "Desktop tab control panel key", () => Key.N);
@@ -52,8 +57,35 @@ namespace ThreeDimensionalDashOnScreen
 		private static ModConfigurationKey<bool> RELEASE_CAM_UI = new ModConfigurationKey<bool>("ReleaseCamUI", "Release Camera Controls UI from its slider (requires restart on change)", () => false);
 
 		[AutoRegisterConfigKey]
-		private static ModConfigurationKey<Key> UI_EDIT_MODE_KEY = new ModConfigurationKey<Key>("UIEditModeKey", "UI edit mode key", () => Key.F4);
-
+		private static ModConfigurationKey<Key> UI_EDIT_MODE_KEY = new ModConfigurationKey<Key>("UIEditModeKey", "UI edit mode key", () => Key.M);
+		
+		private static bool ModActive = true;
+		
+		private static void addToggleModKey(Harmony harmony)
+		{
+			MethodInfo original = AccessTools.DeclaredMethod(typeof(Userspace), "OnCommonUpdate", new Type[] { });
+			MethodInfo postfix = AccessTools.DeclaredMethod(typeof(ThreeDimensionalDashOnScreen), nameof(ToggleModKeybindPostfix));
+			harmony.Patch(original, postfix: new HarmonyMethod(postfix));
+			Debug("Toggle mod keybind added!");
+		}
+		
+		private static void ToggleModKeybindPostfix(Userspace __instance)
+		{
+			if (__instance.InputInterface.GetKeyDown(Config.GetValue(TOGGLE_MOD_KEY)) && __instance.InputInterface.ScreenActive)
+			{
+				ModActive = !ModActive;
+				string status = ModActive ? "ENABLED" : "DISABLED";
+				Msg($"3DDashOnScreen is now: {status}");
+				
+				// Force update dash state immediately
+				UserspaceRadiantDash dash = __instance.Slot.GetComponentInChildren<UserspaceRadiantDash>();
+				if (dash != null)
+				{
+					dash.Dash.ScreenProjection.Value = !ModActive;
+				}
+			}
+		}
+		
 		private static void disableForceItemKeepGrabbed(Harmony harmony)
 		{
 			MethodInfo original = AccessTools.DeclaredMethod(typeof(InteractionHandler), "OnInputUpdate", new Type[] { });
@@ -72,6 +104,8 @@ namespace ThreeDimensionalDashOnScreen
 
 		private static void notificationPanelPostfix(NotificationPanel __instance, SyncRef<Canvas> ____canvas)
 		{
+			if (!ModActive) return;
+			
 			____canvas.Target.Size.Value = NotificationPanel.CANVAS_SIZE;
 			Slot slot = __instance.Slot;
 			float3 v = float3.One;
@@ -104,6 +138,8 @@ namespace ThreeDimensionalDashOnScreen
 
 		private static void DesktopControlsKeybindPostfix(DesktopController __instance)
 		{
+			if (!ModActive) return;
+			
 			MethodInfo toggleControls = __instance.GetType().GetMethod("ToggleControls", BindingFlags.NonPublic | BindingFlags.Instance);
 			if (__instance.InputInterface.GetKeyDown(Config.GetValue(DESKTOP_CONTROL_PANEL_KEY)) && __instance.InputInterface.ScreenActive)
 			{
@@ -114,40 +150,32 @@ namespace ThreeDimensionalDashOnScreen
 		private static void patchCameraUI(Harmony harmony)
 		{
 			MethodInfo original = AccessTools.DeclaredMethod(typeof(InteractiveCameraControl), "OnAttach", new Type[] { });
-			MethodInfo transpiler = AccessTools.DeclaredMethod(typeof(ThreeDimensionalDashOnScreen), nameof(CameraUITranspiler));
+			MethodInfo transpiler = AccessTools.DeclaredMethod(typeof(ThreeDimensionalDashOnScreen), nameof(CameraUIPostfix));
 			MethodInfo postfix = AccessTools.DeclaredMethod(typeof(ThreeDimensionalDashOnScreen), nameof(removeCamUISlider));
 			harmony.Patch(original, transpiler: new HarmonyMethod(transpiler));
 			harmony.Patch(original, postfix: new HarmonyMethod(postfix));
 			Debug("Camera Controls patched!");
 		}
 
-		private static IEnumerable<CodeInstruction> CameraUITranspiler(IEnumerable<CodeInstruction> instructions)
+		private static void CameraUIPostfix(InteractiveCameraControl __instance)
 		{
-			var codes = new List<CodeInstruction>(instructions);
-			for (var i = 0; i < codes.Count; i++)
+			if (ModActive && Config.GetValue(RELEASE_CAM_UI))
 			{
-				if (!Config.GetValue(RELEASE_CAM_UI) && codes[i].opcode == OpCodes.Ldarg_0 && codes[i + 1].opcode == OpCodes.Call && codes[i + 2].opcode == OpCodes.Callvirt && ((MethodInfo)codes[i + 2].operand == typeof(InputInterface).GetMethod("get_VR_Active")) && codes[i + 3].opcode == OpCodes.Brfalse_S)
-				{
-					codes[i].opcode = OpCodes.Nop;
-					codes[i + 1].opcode = OpCodes.Nop;
-					codes[i + 2].opcode = OpCodes.Nop;  //change the whole if statement and it's contents to do nothing
-					codes[i + 3].opcode = OpCodes.Nop;
-				}
-
-				if (Config.GetValue(RELEASE_CAM_UI) && codes[i].opcode == OpCodes.Dup && codes[i + 1].opcode == OpCodes.Brtrue_S && codes[i + 2].opcode == OpCodes.Pop && codes[i + 3].opcode == OpCodes.Br_S)  //find the grabbable destroy call
-				{
-					codes[i + 4].opcode = OpCodes.Pop;  //remove it and instead remove the surplus grabbacle reference
-				}
+				Slider slider = __instance.Slot.GetComponent<Slider>(null, false);
+				if (slider != null)
+					slider.Destroy();
 			}
-			return codes.AsEnumerable();
 		}
 
 		private static void removeCamUISlider(InteractiveCameraControl __instance)
 		{
+			if (!ModActive) return;
+			
 			if (Config.GetValue(RELEASE_CAM_UI))
 			{
 				Slider slider = __instance.Slot.GetComponent<Slider>(null, false);
-				slider.Destroy();
+				if (slider != null)
+					slider.Destroy();
 			}
 		}
 
@@ -158,8 +186,11 @@ namespace ThreeDimensionalDashOnScreen
 			harmony.Patch(original, postfix: new HarmonyMethod(postfix));
 			Debug("UI Edit Mode keybind added!");
 		}
+		
 		private static void KeybindPostfix(Userspace __instance)
 		{
+			if (!ModActive) return;
+			
 			if (!__instance.InputInterface.GetKey(Key.Control) && (!__instance.InputInterface.GetKey(Key.Alt) || !__instance.InputInterface.GetKey(Key.AltGr)))
 			{
 				if (__instance.InputInterface.GetKeyDown(Config.GetValue(UI_EDIT_MODE_KEY)) && __instance.InputInterface.ScreenActive)
@@ -201,7 +232,7 @@ namespace ThreeDimensionalDashOnScreen
 			MethodInfo originalOnCommonUpdate = AccessTools.DeclaredMethod(typeof(UserspaceRadiantDash), "OnCommonUpdate", new Type[] { });
 			MethodInfo originalUpdateOverlayState = AccessTools.DeclaredMethod(typeof(UserspaceRadiantDash), "UpdateOverlayState", new Type[] { });
 			MethodInfo radiantDashCommonUpdateTranspiler = AccessTools.DeclaredMethod(typeof(ThreeDimensionalDashOnScreen), nameof(RadiantDashCommonUpdateTranspiler));
-			MethodInfo updateOverlayStatePrefix = AccessTools.DeclaredMethod(typeof(ThreeDimensionalDashOnScreen), nameof(UpdateOverlayStatePatch));
+			MethodInfo updateOverlayStatePrefix = AccessTools.DeclaredMethod(typeof(ThreeDimensionalDashOnScreen), nameof(UpdateOverlayStatePostfix));
 			MethodInfo onCommonUpdatePostfix = AccessTools.DeclaredMethod(typeof(ThreeDimensionalDashOnScreen), nameof(ScreenProjectionPatch));
 			harmony.Patch(originalOnCommonUpdate, transpiler: new HarmonyMethod(radiantDashCommonUpdateTranspiler));
 			harmony.Patch(originalOnCommonUpdate, postfix: new HarmonyMethod(onCommonUpdatePostfix));
@@ -235,19 +266,26 @@ namespace ThreeDimensionalDashOnScreen
 			return codes.AsEnumerable();
 		}
 
-		private static bool UpdateOverlayStatePatch(UserspaceRadiantDash __instance, SyncRef<Slot> ____notificationsRoot, SyncRef<Slot> ____notificationsHolder)
+		private static bool UpdateOverlayStatePostfix(UserspaceRadiantDash __instance, SyncRef<Slot> ____notificationsRoot, SyncRef<Slot> ____notificationsHolder)
 		{
-			RadiantDash dash = __instance.Dash;
-			dash.VisualsRoot.SetParent(dash.Slot, false);
-			dash.VisualsRoot.SetIdentityTransform();
-			____notificationsHolder.Target.SetParent(____notificationsRoot.Target, keepGlobalTransform: false);
-			____notificationsHolder.Target.SetIdentityTransform();
+			if (ModActive)
+			{
+				RadiantDash dash = __instance.Dash;
+				dash.VisualsRoot.SetParent(dash.Slot, false);
+				dash.VisualsRoot.SetIdentityTransform();
+				____notificationsHolder.Target.SetParent(____notificationsRoot.Target, keepGlobalTransform: false);
+				____notificationsHolder.Target.SetIdentityTransform();
+			}
+
 			return false;
 		}
-
+		
 		private static void ScreenProjectionPatch(UserspaceRadiantDash __instance)
 		{
-			__instance.Dash.ScreenProjection.Value = false;
+			bool desired = ModActive ? false : true;
+			if (__instance.Dash.ScreenProjection.Value != desired)
+				__instance.Dash.ScreenProjection.Value = desired;
 		}
+
 	}
 }
